@@ -15,6 +15,7 @@
 #include "imgui/imgui_internal.h"
 #include "zpp_bits/zpp_bits.h"
 
+#include <bit>
 #include <span>
 
 static void glfw_error_callback(int error, const char* description)
@@ -132,6 +133,15 @@ struct go_ctx {
 	//
 	size_t teams_at_play = {}; // must be 2 or higher
 
+	//
+	struct ko_result {
+		marker_idx marker_id = {};
+		uint32_t turns = {};
+		//uint32_t team = {};
+	};
+
+	ko_result ko = {};
+
 	// we'll use this for any complicated shinanigans
 	std::vector<size_t> temporary_data = {};
 
@@ -139,24 +149,28 @@ struct go_ctx {
 		board[y * board_width + x] = 0ull;
 	}
 
-	void capture(uint32_t y, uint32_t x, team_data team) {
+	size_t capture(uint32_t y, uint32_t x, team_data team) {
 		if (y > board_height || x > board_width)
-			return;
+			return ~size_t{0};
 		if (board[y * board_width + x] == empty)
-			return;
+			return ~size_t{ 0 };
 
 		team_scores[team] += 1;
 		remove_marker_unchecked(y, x);
+		return (y * board_width) + x;
 	}
 
-	void capture_unit_unchecked(size_t unit_idx, team_data target_team, team_data for_team) {
+	size_t capture_unit_unchecked(size_t unit_idx, team_data target_team, team_data for_team) {
 		units& target_units = team_units[target_team];
 		unit& target_unit = target_units[unit_idx];
+		size_t last_capture = ~size_t{ 0 };
+
 		for (size_t i = 0; i < target_unit.size(); i++) {
 			size_t marker_idx = target_unit[i];
-			capture(marker_idx / board_width, marker_idx % board_width, for_team);
+			last_capture = capture(marker_idx / board_width, marker_idx % board_width, for_team);
 		}
 		target_units.erase(target_units.begin() + unit_idx);
+		return last_capture;
 	}
 
 	struct capture_result {
@@ -166,16 +180,16 @@ struct go_ctx {
 
 	uint8_t spaces_occupied_by_team_around(uint32_t y, uint32_t x, team_data t) noexcept {
 		uint8_t neighbor_up_teammate = (y + 1 < board_height
-			&& board[(y + 1) * board_width + y] == t);
+			&& board[(y + 1) * board_width + x] == t);
 
 		uint8_t neighbor_down_teammate = (y - 1 < board_height &&
-			board[(y - 1) * board_width + y] == t) << 1;
+			board[(y - 1) * board_width + x] == t) << 1;
 
 		uint8_t neighbor_right_teammate = (y + 1 < board_width &&
-			board[(y)*board_width + (y + 1)] == t) << 2;
+			board[(y)*board_width + (x + 1)] == t) << 2;
 
 		uint8_t neighbor_left_teammate = (y - 1 < board_width &&
-			board[(y)*board_width + (y - 1)] == t) << 3;
+			board[(y)*board_width + (x - 1)] == t) << 3;
 
 		return neighbor_up_teammate | neighbor_down_teammate | neighbor_right_teammate | neighbor_left_teammate;
 	}
@@ -204,32 +218,33 @@ struct go_ctx {
 
 					uint8_t neighbor_up_empty = (marker_y + 1 < board_height
 						&& board[(marker_y + 1) * board_width + marker_x] == empty);
-					
+
 					uint8_t neighbor_down_empty = (marker_y - 1 < board_height &&
 						board[(marker_y - 1) * board_width + marker_x] == empty);
-					
+
 					uint8_t neighbor_right_empty = (marker_x + 1 < board_width &&
 						board[(marker_y)*board_width + (marker_x + 1)] == empty);
 
 					uint8_t neighbor_left_empty = (marker_x - 1 < board_width &&
 						board[(marker_y)*board_width + (marker_x - 1)] == empty);
 
-					liberties += neighbor_up_empty + neighbor_down_empty + neighbor_right_empty + neighbor_left_empty;
+					liberties += (neighbor_up_empty && ((marker_y + 1) * board_width + marker_x) != space_free) + (neighbor_down_empty && ((marker_y - 1) * board_width + marker_x) != space_free)
+						+ (neighbor_right_empty && ((marker_y)*board_width + (marker_x + 1)) != space_free) + (neighbor_left_empty && ((marker_y)*board_width + (marker_x - 1)) != space_free);
 
-					if (neighbor_up_empty)
+					if (neighbor_up_empty && ((marker_y + 1) * board_width + marker_x) != space_free)
 						space_free = ((marker_y + 1) * board_width + marker_x);
-					
-					if (neighbor_down_empty)
-						space_free = ((marker_y - 1) * board_width + marker_x);
-					
-					if (neighbor_right_empty)
-						space_free = ((marker_y) * board_width + (marker_x + 1));
 
-					if (neighbor_left_empty)
-						space_free = ((marker_y) * board_width + (marker_x-1));
+					if (neighbor_down_empty && ((marker_y - 1) * board_width + marker_x) != space_free)
+						space_free = ((marker_y - 1) * board_width + marker_x);
+
+					if (neighbor_right_empty && ((marker_y)*board_width + (marker_x + 1)) != space_free)
+						space_free = ((marker_y)*board_width + (marker_x + 1));
+
+					if (neighbor_left_empty && ((marker_y)*board_width + (marker_x - 1)) != space_free)
+						space_free = ((marker_y)*board_width + (marker_x - 1));
 				}
 
-				if (liberties == 1 && space_free == (y*board_width + x)) {
+				if (liberties == 1 && space_free == (y * board_width + x)) {
 					// ?
 					result.team = opponent_team;
 					result.unit = current_unit;
@@ -241,15 +256,15 @@ struct go_ctx {
 		return result;
 	}
 
-	capture_result check_for_self_capture(uint32_t y, uint32_t x, team_data team) {
+	capture_result check_for_self_capture(uint32_t y, uint32_t x, team_data team, size_t start_unit = 0, size_t captured_unit = 0) {
 		capture_result result = {};
 
 		units& tunits = team_units[team];
 		size_t liberties = 0ull;
-		for (size_t current_unit = 0; current_unit < tunits.size(); current_unit++) {
+		for (size_t current_unit = start_unit; current_unit < tunits.size(); current_unit++) {
 			unit& tunit = tunits[current_unit];
 
-			size_t space_free = 0ull;
+			size_t space_free = ~size_t{ 0 };
 			for (const marker_idx& idx : tunit) {
 				size_t marker_y = idx / board_width;
 				size_t marker_x = idx % board_width;
@@ -266,26 +281,31 @@ struct go_ctx {
 				uint8_t neighbor_left_empty = (marker_x - 1 < board_width &&
 					board[(marker_y)*board_width + (marker_x - 1)] == empty);
 
-				liberties += neighbor_up_empty + neighbor_down_empty + neighbor_right_empty + neighbor_left_empty;
+				liberties += (neighbor_up_empty && ((marker_y + 1) * board_width + marker_x) != space_free) + (neighbor_down_empty && ((marker_y - 1) * board_width + marker_x) != space_free)
+					+ (neighbor_right_empty && ((marker_y)*board_width + (marker_x + 1)) != space_free) + (neighbor_left_empty && ((marker_y)*board_width + (marker_x - 1)) != space_free);
 
-				if (neighbor_up_empty)
+				if (neighbor_up_empty && ((marker_y + 1) * board_width + marker_x) != space_free)
 					space_free = ((marker_y + 1) * board_width + marker_x);
 
-				if (neighbor_down_empty)
+				if (neighbor_down_empty && ((marker_y - 1) * board_width + marker_x) != space_free)
 					space_free = ((marker_y - 1) * board_width + marker_x);
 
-				if (neighbor_right_empty)
+				if (neighbor_right_empty && ((marker_y)*board_width + (marker_x + 1)) != space_free)
 					space_free = ((marker_y)*board_width + (marker_x + 1));
 
-				if (neighbor_left_empty)
+				if (neighbor_left_empty && ((marker_y)*board_width + (marker_x - 1)) != space_free)
 					space_free = ((marker_y)*board_width + (marker_x - 1));
 			}
 
-			if (liberties == 1 && space_free == (y * board_width + x)) {
+			if (captured_unit == 0 && liberties == 1 && space_free == (y * board_width + x)) {
 				// ?
 				result.team = team;
 				result.unit = current_unit;
 				return result;
+			}
+
+			if (captured_unit != 0 && liberties == 1 && space_free == (y * board_width + x)) {
+				captured_unit--;
 			}
 		}
 
@@ -294,6 +314,37 @@ struct go_ctx {
 
 	inline bool same_marker(uint32_t y0, uint32_t x0, uint32_t y1, uint32_t x1) noexcept {
 		return y0 == y1 && x0 == x1;
+	}
+
+	size_t units_around_for_team(uint32_t y, uint32_t x, team_data team) {
+		uint32_t marker_id = y * board_width + x;
+
+		units& tunits = team_units[team];
+
+		size_t count = 0ull;
+
+		for (size_t current_unit = 0; current_unit < tunits.size(); current_unit++) {
+			unit& tunit = tunits[current_unit];
+			for (const marker_idx& idx : tunit) {
+				size_t marker_y = idx / board_width;
+				size_t marker_x = idx % board_width;
+
+				bool marker_belongs_to_unit = (marker_y + 1 < board_height
+					&& same_marker(marker_y + 1, marker_x, y, x)) || (marker_y - 1 < board_height &&
+						same_marker(marker_y - 1, marker_x, y, x)) ||
+					(marker_x + 1 < board_width &&
+						same_marker(marker_y, marker_x + 1, y, x)) ||
+					(marker_x - 1 < board_width &&
+						same_marker(marker_y, marker_x - 1, y, x));
+
+				if (marker_belongs_to_unit) {
+					count++;
+					break;
+				}
+			}
+		}
+
+		return count;
 	}
 
 	void form_unit_for_team(uint32_t y, uint32_t x, team_data team,
@@ -318,8 +369,10 @@ struct go_ctx {
 					(marker_x - 1 < board_width &&
 						same_marker(marker_y, marker_x - 1, y, x));
 
-				if (marker_belongs_to_unit)
+				if (marker_belongs_to_unit) {
 					expanded_units_tmp_stack.emplace_back(current_unit);
+					break;
+				}
 			}
 		}
 
@@ -342,9 +395,10 @@ struct go_ctx {
 					expanded_units_tmp_stack.size() - (tmp_idx + 1)
 					});
 			}
-		} else {
+		}
+		else {
 			// add a new unit
-			unit &tunit = tunits.emplace_back();
+			unit& tunit = tunits.emplace_back();
 			tunit.emplace_back(marker_id);
 		}
 
@@ -357,39 +411,74 @@ struct go_ctx {
 			return false;
 		if (board[y * board_width + x] != empty)
 			return false;
+		if (ko.marker_id == (y * board_width) + x)
+			return false;
 
 		capture_result r = check_for_captures(y, x, team);
-		capture_result r_self = check_for_self_capture(y, x, team);
+		//capture_result r_self_2 = check_for_self_capture(y, x, team);
+		uint8_t free_intersections = spaces_free_around(y, x);
+		uint8_t friendly_intersections = spaces_occupied_by_team_around(y, x, team);
 
-		if (r.team == empty && r_self.team == empty) {
+		// there's a space next to this available, a legal move (simple)
+		if (r.team == empty && free_intersections != 0) { //std::popcount(free_intersections) >= 1
 			board[y * board_width + x] = team;
 			form_unit_for_team(y, x, team, temporary_data);
+			ko.marker_id = ~size_t{ 0ull };
 			return true;
 		}
-		else if (r.team == empty && r_self.team == team) {
-			// self capture not allowed?
-			return false;
-		}
-		else if (r.team != empty) {
+
+		// if we can capture something (we'll definitely get a liberty so always allowed)
+		if (r.team != empty) {
+			size_t last_capture = ~size_t{0};
+			size_t previous_score = team_scores[team];
 			do {
-				capture_unit_unchecked(r.unit, r.team, team);
+				last_capture = capture_unit_unchecked(r.unit, r.team, team);
 			} while ((r = check_for_captures(y, x, team)), r.team != empty);
+
+			// ko as described reads as though we need to keep a full history of
+			// all moves of the game*, which would require an insane amount of space
+			// I don't know if this properly implements "ko"
+			// but it should prevent infinitely repeating moves
+			if ((team_scores[team] - previous_score) == 1)
+				ko.marker_id = last_capture;
+			else
+				ko.marker_id = ~size_t{ 0ull };
 
 			board[y * board_width + x] = team;
 			form_unit_for_team(y, x, team, temporary_data);
 
+			return true;
+		}
+
+		capture_result r_self_0 = check_for_self_capture(y, x, team);
+		capture_result r_self_1 = check_for_self_capture(y, x, team, r_self_0.unit + 1);
+		capture_result r_self_2 = check_for_self_capture(y, x, team, r_self_1.unit + 1);
+		capture_result r_self_3 = check_for_self_capture(y, x, team, r_self_2.unit + 1);
+
+		size_t unit_count = units_around_for_team(y, x, team);
+
+		// no space available and we didn't capture*
+
+		// we must not make a move that "self" captures
+		// eg: we can't make a move that removes the last liberty
+		// from one of our units which at risk of being captured
+		if ((unit_count==4 && r_self_3.team==team)||
+			(unit_count==3 && r_self_2.team==team)||
+			(unit_count==2 && r_self_1.team==team)||
+			(unit_count==1 && r_self_0.team==team)) { //r.team == empty && 
+			return false;
+		}
+
+		// if we're not at risk of self capture but the unit is surrounded
+		// we're still a legal move?
+		if (friendly_intersections > 0) {
+			board[y * board_width + x] = team;
+			form_unit_for_team(y, x, team, temporary_data);
+			ko.marker_id = ~size_t{ 0ull };
 			return true;
 		}
 
 		return false;
-		/*
-		if (r.team == empty && spaces_free_around(y,x) == 0) {
-			// not a legal move if the space is surrounded
-			return; 
-		} else {
-
-		}
-		*/
 	}
 
 	void reserve_board_data(uint32_t new_board_height, uint32_t new_board_width, team_data team_count = 2) {
@@ -496,7 +585,7 @@ int main(int argc, char** argv)
 
 			//ImVec2 grid_top_left = { (float)0 * tile_dim, (float)0 * tile_dim };
 			//ImVec2 grid_btm_right = { (float)(go_game.board_width + 1) * tile_dim, (float)(go_game.board_height + 1) * tile_dim };
-			
+
 			//bool mouse_in_grid = ImGui::IsMouseHoveringRect(grid_top_left, grid_btm_right);
 
 			bool left_clicked = ok_mouse && ImGui::IsMouseClicked(ImGuiMouseButton_::ImGuiMouseButton_Left);
@@ -506,7 +595,7 @@ int main(int argc, char** argv)
 
 			// background
 			draw_list->AddRectFilled(ImVec2{ (float)tile_dim / 2, (float)tile_dim / 2 },
-				ImVec2{ (float)tile_dim * go_game.board_width + (tile_dim / 2), (float)tile_dim * go_game.board_height + (tile_dim / 2)},
+				ImVec2{ (float)tile_dim * go_game.board_width + (tile_dim / 2), (float)tile_dim * go_game.board_height + (tile_dim / 2) },
 				wood);
 
 
@@ -525,19 +614,19 @@ int main(int argc, char** argv)
 			draw_list->AddRect(ImVec2{ (float)tile_dim, (float)tile_dim },
 				ImVec2{ (float)tile_dim * go_game.board_width, (float)tile_dim * go_game.board_height },
 				black, 0.0f, 0, line_width * 1.1f
-				);
+			);
 
 			//19x19 (19 / 2) -> 9, (9 / 2) -> 4
 			//0 1 2 3 ||4|| 5 6 7 8 |9| 10 11 12 13 ||14|| 15 16 17 18
-			
+
 			// star points
-			uint32_t mid_star_y  = go_game.board_height / 2;
-			uint32_t low_star_y  = mid_star_y / 2;
-			uint32_t high_star_y = (go_game.board_height -1) - low_star_y;
+			uint32_t mid_star_y = go_game.board_height / 2;
+			uint32_t low_star_y = mid_star_y / 2;
+			uint32_t high_star_y = (go_game.board_height - 1) - low_star_y;
 
 			uint32_t mid_star_x = go_game.board_width / 2;
 			uint32_t low_star_x = mid_star_x / 2;
-			uint32_t high_star_x = (go_game.board_width -1) - low_star_x;
+			uint32_t high_star_x = (go_game.board_width - 1) - low_star_x;
 
 			{
 				draw_list->AddCircleFilled(
@@ -580,8 +669,8 @@ int main(int argc, char** argv)
 
 			for (size_t y = 0; y < go_game.board_height; y++) {
 				for (size_t x = 0; x < go_game.board_width; x++) {
-					ImVec2 top_left = { (float)tile_dim * (x + 1) - (tile_dim / 4), (float)tile_dim * (y + 1) - (tile_dim/4) };
-					ImVec2 bottom_right = { (float)tile_dim * (x + 1) + (tile_dim / 4), (float)tile_dim * (y + 1) + (tile_dim/4) };
+					ImVec2 top_left = { (float)tile_dim * (x + 1) - (tile_dim / 4), (float)tile_dim * (y + 1) - (tile_dim / 4) };
+					ImVec2 bottom_right = { (float)tile_dim * (x + 1) + (tile_dim / 4), (float)tile_dim * (y + 1) + (tile_dim / 4) };
 
 					bool is_hovering = ImGui::IsMouseHoveringRect(top_left, bottom_right);
 
@@ -597,7 +686,7 @@ int main(int argc, char** argv)
 					if (go_game.board[y * go_game.board_width + x] != go_ctx::empty) {
 						draw_list->AddCircleFilled(
 							ImVec2{ (float)tile_dim * (x + 1), (float)tile_dim * (y + 1) },
-							((tile_dim*3) / 8),
+							((tile_dim * 3) / 8),
 							team_color_palette[go_game.board[y * go_game.board_width + x] % team_color_palette.size()]);
 					}
 					// if placed marker -> alternate teams
