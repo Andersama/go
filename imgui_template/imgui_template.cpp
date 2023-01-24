@@ -14,7 +14,13 @@
 //we need this to change tesselation tolerance
 #include "imgui/imgui_internal.h"
 #include "zpp_bits/zpp_bits.h"
+#include "rpc/server.h"
+#include "rpc/client.h"
+#include "rpc/rpc_error.h"
+#include "sqlite3.h"
+//#include "rpc/dispatcher.h"
 
+#include <thread>
 #include <bit>
 #include <span>
 
@@ -151,7 +157,7 @@ struct go_ctx {
 
 	size_t capture(uint32_t y, uint32_t x, team_data team) {
 		if (y > board_height || x > board_width)
-			return ~size_t{0};
+			return ~size_t{ 0 };
 		if (board[y * board_width + x] == empty)
 			return ~size_t{ 0 };
 
@@ -429,7 +435,7 @@ struct go_ctx {
 
 		// if we can capture something (we'll definitely get a liberty so always allowed)
 		if (r.team != empty) {
-			size_t last_capture = ~size_t{0};
+			size_t last_capture = ~size_t{ 0 };
 			size_t previous_score = team_scores[team];
 			do {
 				last_capture = capture_unit_unchecked(r.unit, r.team, team);
@@ -462,10 +468,10 @@ struct go_ctx {
 		// we must not make a move that "self" captures
 		// eg: we can't make a move that removes the last liberty
 		// from one of our units which at risk of being captured
-		if ((unit_count==4 && r_self_3.team==team)||
-			(unit_count==3 && r_self_2.team==team)||
-			(unit_count==2 && r_self_1.team==team)||
-			(unit_count==1 && r_self_0.team==team)) { //r.team == empty && 
+		if ((unit_count == 4 && r_self_3.team == team) ||
+			(unit_count == 3 && r_self_2.team == team) ||
+			(unit_count == 2 && r_self_1.team == team) ||
+			(unit_count == 1 && r_self_0.team == team)) { //r.team == empty && 
 			return false;
 		}
 
@@ -506,6 +512,8 @@ struct go_ctx {
 	}
 };
 
+
+
 int main(int argc, char** argv)
 {
 	uint32_t window_width = 1920;
@@ -515,11 +523,60 @@ int main(int argc, char** argv)
 	bool show_demo_window = true;
 
 	go_ctx go_game = {};
+	go_ctx::team_data team_to_move = 1ull;
 	/*
 	uint32_t x_tiles = 9;
 	uint32_t y_tiles = 9;
 	*/
 	go_game.initialize_board();
+
+	/*
+	int server_port = 8080;
+	std::jthread server_thread{ [&server_port, &go_game, &team_to_move]() {
+		rpc::server srv(server_port);
+
+		srv.bind("peform_move", [&go_game, &team_to_move](uint32_t y, uint32_t x, go_ctx::team_data t) {
+			if (t != team_to_move)
+				return false;
+			bool can_move = go_game.place_marker(y, x, t);
+			if (can_move) {
+				team_to_move += 1;
+				team_to_move %= (go_game.teams_at_play + 1);
+				team_to_move += (t == 0); //skip empty team
+			}
+			return can_move;
+		});
+
+		srv.run();
+	}};
+	
+	*/
+	/*
+	using namespace zpp::bits::literals;
+	// Server and client together:
+	using rpc = zpp::bits::rpc<
+		zpp::bits::bind<foo, "foo"_sha256_int>,
+		zpp::bits::bind<bar, "bar"_sha256_int>
+	>;
+	auto [client, server] = rpc::client_server(in, out);
+	*/
+	int server_port = rpc::constants::DEFAULT_PORT;
+	rpc::server srv(server_port);
+
+	srv.bind("perform_move", [&go_game, &team_to_move](uint32_t y, uint32_t x, go_ctx::team_data t) {
+		if (t != team_to_move)
+			return false;
+		bool can_move = go_game.place_marker(y, x, t);
+		if (can_move) {
+			team_to_move += 1;
+			team_to_move %= (go_game.teams_at_play + 1);
+			team_to_move += (team_to_move == 0); //skip empty team
+		}
+		return can_move;
+		});
+
+	srv.async_run();
+	rpc::client client("127.0.0.1", server_port);
 
 	// wood dbaf67
 	ImU32 gray = ImU32{ 0xffc1c0c1 };
@@ -675,14 +732,26 @@ int main(int argc, char** argv)
 					bool is_hovering = ImGui::IsMouseHoveringRect(top_left, bottom_right);
 
 					bool placed_marker = false; //go_game.board[y * go_game.board_width + x] != go_ctx::empty;
+					try {
+						if (!placed_marker && is_hovering && left_clicked) {
+							//placed_marker = go_game.place_marker(y, x, 1ull);
+							client.call("perform_move", (uint32_t)y, (uint32_t)x, (uint8_t)1ull);
+						}
+						else if (!placed_marker && is_hovering && right_clicked) {
+							//placed_marker = go_game.place_marker(y, x, 2ull);
+							client.call("perform_move", (uint32_t)y, (uint32_t)x, (uint8_t)2ull);
+						}
+					} catch (rpc::rpc_error& e) {
+						std::cout << std::endl << e.what() << std::endl;
+						std::cout << "in function '" << e.get_function_name() << "': ";
 
-					if (!placed_marker && is_hovering && left_clicked) {
-						placed_marker = go_game.place_marker(y, x, 1ull);
+						using err_t = std::tuple<int, std::string>;
+						auto err = e.get_error().as<err_t>();
+						std::cout << "[error " << std::get<0>(err) << "]: " << std::get<1>(err)
+							<< std::endl;
+						return 1;
 					}
-					else if (!placed_marker && is_hovering && right_clicked) {
-						placed_marker = go_game.place_marker(y, x, 2ull);
-					}
-
+					
 					if (go_game.board[y * go_game.board_width + x] != go_ctx::empty) {
 						draw_list->AddCircleFilled(
 							ImVec2{ (float)tile_dim * (x + 1), (float)tile_dim * (y + 1) },
@@ -722,7 +791,9 @@ int main(int argc, char** argv)
 	return r.err_code;
 }
 
+/*
 // boilerplate ~for windows build~
 int WinMain(int argc, char** argv) {
 	return main(argc, argv);
 }
+*/

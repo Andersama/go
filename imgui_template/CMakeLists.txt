@@ -10,6 +10,12 @@ include_directories(${GLFW_INCLUDE_DIRS})
 find_package(OpenGL REQUIRED)
 include_directories(${OPENGL_INCLUDE_DIRS})
 
+# sqlite
+find_package(unofficial-sqlite3 CONFIG REQUIRED)
+
+# rpc
+find_package(rpclib CONFIG REQUIRED)
+
 # Add source to this project's executable.
 add_executable (imgui_template "imgui_template.cpp" "imgui_template.h" "imgui/imconfig.h" "imgui/imgui.cpp" "imgui/imgui.h" "imgui/imgui_demo.cpp" "imgui/imgui_draw.cpp" "imgui/imgui_impl_glfw.cpp" "imgui/imgui_impl_glfw.h" "imgui/imgui_impl_opengl3.cpp" "imgui/imgui_impl_opengl3.h" "imgui/imgui_impl_opengl3_loader.h" "imgui/imgui_internal.h" "imgui/imgui_stdlib.cpp" "imgui/imgui_stdlib.h" "imgui/imgui_tables.cpp" "imgui/imgui_widgets.cpp" "imgui/imstb_rectpack.h" "imgui/imstb_textedit.h" "imgui/imstb_truetype.h" "zpp_bits/zpp_bits.h")
 
@@ -22,4 +28,6 @@ endif()
 target_link_libraries(${PROJECT_NAME} PRIVATE
 	glfw
 	${OPENGL_LIBRARIES}
+	unofficial::sqlite3::sqlite3
+	rpclib::rpc
 )
