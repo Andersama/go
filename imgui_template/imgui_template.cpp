@@ -18,6 +18,9 @@
 #include "rpc/client.h"
 #include "rpc/rpc_error.h"
 #include "sqlite3.h"
+
+#include "stack_vector/stack_vector.h"
+#include "fmt/format.h"
 //#include "rpc/dispatcher.h"
 
 #include <thread>
@@ -512,7 +515,285 @@ struct go_ctx {
 	}
 };
 
+struct go_board_bounds {
+	uint32_t y0;
+	uint32_t x0;
+	uint32_t y1;
+	uint32_t x1;
+};
 
+struct go_conditional_move {
+	go_board_bounds bounds = {};
+	uint32_t y;
+	uint32_t x;
+	uint32_t team;
+};
+
+struct go_match {
+	uint64_t game_id = {}; //unique id
+	uint64_t host = {}; //ipv4/6 address
+	uint32_t port = {}; //
+
+	go_ctx go_game = {}; //
+	go_ctx::team_data team_turn = 1; //
+
+	go_ctx::team_data next_to_play_after(go_ctx::team_data t) {
+		t += 1;
+		t %= (go_game.teams_at_play + 1);
+		t += (t == go_ctx::empty);
+
+		return t;
+	}
+
+
+	std::vector<go_conditional_move> conditional_move = {}; //
+};
+
+struct go_match_settings {
+	std::vector<ImU32> team_color_palette = {};
+	ImU32 wood_color = ImU32{ 0xff67afdb };
+	ImU32 line_color = ImU32{ 0xff030303 };
+};
+
+struct go_board_interaction {
+	float width = {};
+	float height = {};
+
+	uint32_t interest_x = {};
+	uint32_t interest_y = {};
+
+	bool left_clicked = false;
+	bool right_clicked = false;
+	bool hovered_tile = false;
+	bool hovered_board = false;
+};
+
+go_board_interaction draw_go_board(go_ctx& go_game, const std::vector<ImU32>& team_color_palette, ImU32 wood_color, ImU32 line_color) {
+	//ImGui::Begin("##go", nullptr, 0);
+	//ImGuiWindowFlags_::ImGuiWindowFlags_NoTitleBar
+	//| ImGuiWindowFlags_::ImGuiWindowFlags_NoMove
+	//|ImGuiWindowFlags_::ImGuiWindowFlags_NoCollapse
+	go_board_interaction result = {};
+	result.interest_x = ~0;
+	result.interest_y = ~0;
+
+	ImVec2 cursor_position = ImGui::GetCursorScreenPos();
+	ImDrawList* draw_list = ImGui::GetWindowDrawList();
+	float window_width = ImGui::CalcItemWidth();
+	float window_height = ImGui::GetWindowHeight();
+
+	float full_width = std::max(window_width, (float)20 * (go_game.board_width));
+	float full_height = std::max(window_height, (float)20 * (go_game.board_height));
+
+	float tile_xdim = full_width / (go_game.board_width + 1);
+	float tile_ydim = full_height / (go_game.board_height + 1);
+
+	int tile_dim = std::min(tile_xdim, tile_ydim);
+
+	float line_width = tile_dim / 20.0f;
+
+	// give 1/2 tile spacing all around
+	result.width = (float)tile_dim * (go_game.board_width + 1);
+	result.height = (float)tile_dim * (go_game.board_height + 1);
+
+	ImVec2 mouse = ImGui::GetMousePos();
+	bool ok_mouse = ImGui::IsMousePosValid(&mouse);
+
+	//ImVec2 grid_top_left = { (float)0 * tile_dim, (float)0 * tile_dim };
+	//ImVec2 grid_btm_right = { (float)(go_game.board_width + 1) * tile_dim, (float)(go_game.board_height + 1) * tile_dim };
+
+	//bool mouse_in_grid = ImGui::IsMouseHoveringRect(grid_top_left, grid_btm_right);
+
+	bool left_clicked = ok_mouse && ImGui::IsMouseClicked(ImGuiMouseButton_::ImGuiMouseButton_Left);
+	bool right_clicked = ok_mouse && ImGui::IsMouseClicked(ImGuiMouseButton_::ImGuiMouseButton_Right);
+
+	//ImDrawList* draw_list = ImGui::GetWindowDrawList();
+
+	// background
+	{
+		ImVec2 background_topleft = { (float)tile_dim / 2
+			+ cursor_position.x, (float)tile_dim / 2 + cursor_position.y };
+
+		ImVec2 background_bottomright = {
+				(float)tile_dim * go_game.board_width + (tile_dim / 2)
+				+ cursor_position.x,
+			(float)tile_dim * go_game.board_height + (tile_dim / 2) +
+			cursor_position.y };
+
+		draw_list->AddRectFilled(background_topleft,
+			background_bottomright,
+			wood_color);
+		result.hovered_board = ImGui::IsMouseHoveringRect(background_topleft, background_bottomright);
+	}
+
+	// draw lines
+	for (size_t i = 1; i < (go_game.board_width + 1); i++) {
+		draw_list->AddLine(ImVec2{ (float)i * tile_dim + cursor_position.x, (float)tile_dim + cursor_position.y },
+			ImVec2{ (float)i * tile_dim + cursor_position.x, (float)go_game.board_height * tile_dim + cursor_position.y }, line_color, line_width);
+	}
+
+	for (size_t i = 1; i < (go_game.board_height + 1); i++) {
+		draw_list->AddLine(
+			ImVec2{ (float)tile_dim + cursor_position.x, (float)i * tile_dim + cursor_position.y },
+			ImVec2{ (float)go_game.board_width * tile_dim + cursor_position.x, (float)i * tile_dim + cursor_position.y }, line_color, line_width);
+	}
+
+	// fixup grid corners
+	draw_list->AddRect(ImVec2{ (float)tile_dim + cursor_position.x, (float)tile_dim + cursor_position.y },
+		ImVec2{ (float)tile_dim * go_game.board_width + cursor_position.x, (float)tile_dim * go_game.board_height + cursor_position.y },
+		line_color, 0.0f, 0, line_width * 1.1f
+	);
+
+	//19x19 (19 / 2) -> 9, (9 / 2) -> 4
+	//0 1 2 3 ||4|| 5 6 7 8 |9| 10 11 12 13 ||14|| 15 16 17 18
+
+	// star points
+	uint32_t mid_star_y = go_game.board_height / 2;
+	uint32_t low_star_y = mid_star_y / 2;
+	uint32_t high_star_y = (go_game.board_height - 1) - low_star_y;
+
+	uint32_t mid_star_x = go_game.board_width / 2;
+	uint32_t low_star_x = mid_star_x / 2;
+	uint32_t high_star_x = (go_game.board_width - 1) - low_star_x;
+
+	{
+		draw_list->AddCircleFilled(
+			ImVec2{ (float)tile_dim * (low_star_y + 1) + cursor_position.x, (float)tile_dim * (low_star_x + 1) + cursor_position.y }, (line_width * 2.0f),
+			line_color);
+		/*
+		draw_list->AddCircleFilled(
+			ImVec2{ (float)tile_dim * (low_star_y + 1), (float)tile_dim * (mid_star_x + 1) }, (line_width * 2.5f),
+			black);
+			*/
+		draw_list->AddCircleFilled(
+			ImVec2{ (float)tile_dim * (low_star_y + 1) + cursor_position.x, (float)tile_dim * (high_star_x + 1) + cursor_position.y }, (line_width * 2.0f),
+			line_color);
+
+		/*
+		draw_list->AddCircleFilled(
+			ImVec2{ (float)tile_dim * (mid_star_y + 1), (float)tile_dim * (low_star_x + 1) }, (line_width * 2.5f),
+			black);
+			*/
+		draw_list->AddCircleFilled(
+			ImVec2{ (float)tile_dim * (mid_star_y + 1) + cursor_position.x, (float)tile_dim * (mid_star_x + 1) + cursor_position.y }, (line_width * 2.0f),
+			line_color);
+		/*
+		draw_list->AddCircleFilled(
+			ImVec2{ (float)tile_dim * (mid_star_y + 1), (float)tile_dim * (high_star_x + 1) }, (line_width * 2.5f),
+			black);
+			*/
+		draw_list->AddCircleFilled(
+			ImVec2{ (float)tile_dim * (high_star_y + 1) + cursor_position.x, (float)tile_dim * (low_star_x + 1) + cursor_position.y }, (line_width * 2.0f),
+			line_color);
+		/*
+		draw_list->AddCircleFilled(
+			ImVec2{ (float)tile_dim * (high_star_y + 1), (float)tile_dim * (mid_star_x + 1) }, (line_width * 2.5f),
+			black);
+			*/
+		draw_list->AddCircleFilled(
+			ImVec2{ (float)tile_dim * (high_star_y + 1) + cursor_position.x, (float)tile_dim * (high_star_x + 1) + cursor_position.y }, (line_width * 2.0f),
+			line_color);
+	}
+
+	bool hovering_over_intersection = false;
+
+	for (size_t y = 0; y < go_game.board_height; y++) {
+		for (size_t x = 0; x < go_game.board_width; x++) {
+			ImVec2 top_left = { (float)tile_dim * (x + 1) - (tile_dim / 4) + cursor_position.x, (float)tile_dim * (y + 1) - (tile_dim / 4) + cursor_position.y };
+			ImVec2 bottom_right = { (float)tile_dim * (x + 1) + (tile_dim / 4) + cursor_position.x, (float)tile_dim * (y + 1) + (tile_dim / 4) + cursor_position.y };
+
+			bool is_hovering = ImGui::IsMouseHoveringRect(top_left, bottom_right);
+			hovering_over_intersection = hovering_over_intersection || is_hovering;
+
+			if (is_hovering) {
+				result.hovered_tile = true;
+				result.interest_x = x;
+				result.interest_y = y;
+			}
+
+			bool placed_marker = false; //go_game.board[y * go_game.board_width + x] != go_ctx::empty;
+
+			if (is_hovering && left_clicked) {
+				result.left_clicked = true;
+				result.interest_x = x;
+				result.interest_y = y;
+			}
+
+			if (is_hovering && right_clicked) {
+				result.right_clicked = true;
+				result.interest_x = x;
+				result.interest_y = y;
+			}
+			//ImGui::InvisibleButton("##intersection");
+
+#if 0
+			try {
+				if (!placed_marker && is_hovering && left_clicked) {
+					placed_marker = go_game.place_marker(y, x, 1ull);
+					if (placed_marker) {
+						bool accepted_move = client.call("perform_move", (uint32_t)y, (uint32_t)x, (uint8_t)1ull).as<bool>();
+					}
+				}
+				else if (!placed_marker && is_hovering && right_clicked) {
+					placed_marker = go_game.place_marker(y, x, 2ull);
+					if (placed_marker) {
+						//client.call("perform_move", (uint32_t)y, (uint32_t)x, (uint8_t)2ull);
+						bool accepted_move = client.call("perform_move", (uint32_t)y, (uint32_t)x, (uint8_t)2ull).as<bool>();
+					}
+				}
+			}
+			catch (rpc::rpc_error& e) {
+				std::cout << std::endl << e.what() << std::endl;
+				std::cout << "in function '" << e.get_function_name() << "': ";
+
+				using err_t = std::tuple<int, std::string>;
+				auto err = e.get_error().as<err_t>();
+				std::cout << "[error " << std::get<0>(err) << "]: " << std::get<1>(err)
+					<< std::endl;
+				return 1;
+			}
+#endif
+
+			if (go_game.board[y * go_game.board_width + x] != go_ctx::empty) {
+				draw_list->AddCircleFilled(
+					ImVec2{ (float)tile_dim * (x + 1) + cursor_position.x, (float)tile_dim * (y + 1) + cursor_position.y },
+					((tile_dim * 3) / 8),
+					team_color_palette[go_game.board[y * go_game.board_width + x] % team_color_palette.size()]);
+			}
+			// if placed marker -> alternate teams
+		}
+	}
+
+
+	//ImGuiWindowFlags overlay_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+	//ImGui::SetNextWindowPos(cursor_position, ImGuiCond_Always);
+	if (hovering_over_intersection) {
+		//if (ImGui::Begin("##info", nullptr, overlay_flags))
+		//{
+		if (result.interest_x < go_game.board_width && result.interest_y < go_game.board_height) {
+			//char tmp_buf[64] = {};
+			stack_vector::stack_vector<char, 64> tmp_buf = {};
+			fmt::format_to(std::back_inserter(tmp_buf), "Intersection: ({},{})", result.interest_x, result.interest_y);
+			draw_list->AddText(cursor_position, ImU32{0xffffffff}, tmp_buf.data(), tmp_buf.data()+tmp_buf.size());
+			//draw_list->AddText()
+			//ImGui::Text("Intersection: (%d, %d)", hover_x, hover_y);
+		}
+		else {
+			std::string_view v = "Intersection: (?, ?)";
+			draw_list->AddText(cursor_position, ImU32{ 0xffffffff }, v.data(), v.data()+v.size());
+			//ImGui::Text("Intersection: (?, ?)");
+		}
+		//	ImGui::End();
+		//}
+	}
+
+	//ImGui::End();
+	return result;
+}
+
+go_board_interaction draw_go_match(go_match& match, go_match_settings& settings) {
+	return draw_go_board(match.go_game, settings.team_color_palette, settings.wood_color, settings.line_color);
+}
 
 int main(int argc, char** argv)
 {
@@ -522,13 +803,42 @@ int main(int argc, char** argv)
 
 	bool show_demo_window = true;
 
-	go_ctx go_game = {};
+	std::vector<go_match> matches = {}; // list of games/opponents
+	std::vector<go_match_settings> settings = {}; // local to player
+
+	//TODO: load previous matches and settings
+
+	matches.emplace_back();
+	settings.emplace_back();
+	std::array<ImU32, 9> default_team_color_palette = {
+		ImU32{0xffFAF9F8},
+		ImU32{0xff292521},
+
+		ImU32{0xffEFECE9},
+		ImU32{0xff403A34},
+
+		ImU32{0xffE6E2DE},
+		ImU32{0xff575049},
+
+		ImU32{0xffDAD4CE},
+		ImU32{0xff7D756C},
+
+		ImU32{0xffBDB5AD}
+	};
+
+	settings[0].team_color_palette.reserve(default_team_color_palette.size());
+	for (size_t i = 0; i < default_team_color_palette.size(); i++) {
+		settings[0].team_color_palette.emplace_back(default_team_color_palette[i]);
+	}
+	matches[0].go_game.initialize_board(); //defaults to full sized board
+
+	//go_ctx go_game = {};
 	go_ctx::team_data team_to_move = 1ull;
 	/*
 	uint32_t x_tiles = 9;
 	uint32_t y_tiles = 9;
 	*/
-	go_game.initialize_board();
+	//go_game.initialize_board();
 
 	/*
 	int server_port = 8080;
@@ -549,7 +859,7 @@ int main(int argc, char** argv)
 
 		srv.run();
 	}};
-	
+
 	*/
 	/*
 	using namespace zpp::bits::literals;
@@ -562,7 +872,7 @@ int main(int argc, char** argv)
 	*/
 	int server_port = rpc::constants::DEFAULT_PORT;
 	rpc::server srv(server_port);
-
+#if 0
 	srv.bind("perform_move", [&go_game, &team_to_move](uint32_t y, uint32_t x, go_ctx::team_data t) {
 		if (t != team_to_move)
 			return false;
@@ -575,32 +885,48 @@ int main(int argc, char** argv)
 		return can_move;
 		});
 
+	bool querying_new_game = false;
+	bool accepts_new_game = false;
+	bool rejects_new_game = false;
+	srv.bind("query_new_game", [&go_game, &accepts_new_game, &rejects_new_game, &querying_new_game](uint32_t y, uint32_t x, go_ctx::team_data players) {
+		if (players < 2)
+			return false;
+
+		using namespace std::chrono_literals;
+		querying_new_game = true;
+		accepts_new_game = false;
+		rejects_new_game = false;
+
+		while (!accepts_new_game || !rejects_new_game) {
+			std::this_thread::sleep_for(16ms);
+		}
+
+		if (accepts_new_game) {
+
+		}
+		else {
+
+}
+		});
+
 	srv.async_run();
 	rpc::client client("127.0.0.1", server_port);
-
+#endif
 	// wood dbaf67
 	ImU32 gray = ImU32{ 0xffc1c0c1 };
 	ImU32 dark_gray = ImU32{ 0xff4d4d4d };
 	ImU32 red = ImU32{ 0xff2828f2 };
 
-	ImU32 black = ImU32{ 0xff030303 };
-	ImU32 wood = ImU32{ 0xff67afdb };
+	uint32_t study_board_width = 19;
+	uint32_t study_board_height = 19;
 
-	std::array<ImU32, 9> team_color_palette = {
-		ImU32{0xffFAF9F8},
-		ImU32{0xff292521},
+	go_match study = {};
+	go_match_settings study_settings = {};
+	study.go_game.initialize_board(study_board_width, study_board_height);
 
-		ImU32{0xffEFECE9},
-		ImU32{0xff403A34},
-
-		ImU32{0xffE6E2DE},
-		ImU32{0xff575049},
-
-		ImU32{0xffDAD4CE},
-		ImU32{0xff7D756C},
-
-		ImU32{0xffBDB5AD}
-	};
+	for (size_t i = 0; i < default_team_color_palette.size(); i++) {
+		study_settings.team_color_palette.emplace_back(default_team_color_palette[i]);
+	}
 
 	while (!glfwWindowShouldClose(r.window))
 	{
@@ -617,155 +943,77 @@ int main(int argc, char** argv)
 		ImGui::NewFrame();
 
 		//ImGui::ShowDemoWindow(&show_demo_window);
+		/*
+		const ImGuiViewport* viewport = ImGui::GetMainViewport();
+		ImVec2 work_pos = viewport->WorkPos; // Use work area to avoid menu-bar/task-bar, if any!
+		ImVec2 work_size = viewport->WorkSize;
 
-		int width;
-		int height;
-		glfwGetFramebufferSize(r.window, &width, &height);
-		ImGui::SetNextWindowSize(ImVec2(width, height)); // ensures ImGui fits the GLFW window
+		ImGui::GetMainViewport()->GetCenter();
 
-		int tile_xdim = width / (go_game.board_width + 1);
-		int tile_ydim = height / (go_game.board_height + 1);
-
-		int tile_dim = std::min(tile_xdim, tile_ydim);
-
-		ImGui::SetNextWindowPos(ImVec2(0, 0));
-		{
-			ImGui::Begin("go", nullptr, ImGuiWindowFlags_::ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_::ImGuiWindowFlags_NoMove |
-				ImGuiWindowFlags_::ImGuiWindowFlags_NoCollapse
-			);
-
-			float line_width = tile_dim / 20.0f;
-
-			ImVec2 mouse = ImGui::GetMousePos();
-
-			bool ok_mouse = ImGui::IsMousePosValid(&mouse);
-
-			//ImVec2 grid_top_left = { (float)0 * tile_dim, (float)0 * tile_dim };
-			//ImVec2 grid_btm_right = { (float)(go_game.board_width + 1) * tile_dim, (float)(go_game.board_height + 1) * tile_dim };
-
-			//bool mouse_in_grid = ImGui::IsMouseHoveringRect(grid_top_left, grid_btm_right);
-
-			bool left_clicked = ok_mouse && ImGui::IsMouseClicked(ImGuiMouseButton_::ImGuiMouseButton_Left);
-			bool right_clicked = ok_mouse && ImGui::IsMouseClicked(ImGuiMouseButton_::ImGuiMouseButton_Right);
-
-			ImDrawList* draw_list = ImGui::GetWindowDrawList();
-
-			// background
-			draw_list->AddRectFilled(ImVec2{ (float)tile_dim / 2, (float)tile_dim / 2 },
-				ImVec2{ (float)tile_dim * go_game.board_width + (tile_dim / 2), (float)tile_dim * go_game.board_height + (tile_dim / 2) },
-				wood);
-
-
-			// draw lines
-			for (size_t i = 1; i < (go_game.board_width + 1); i++) {
-				draw_list->AddLine(ImVec2{ (float)i * tile_dim, (float)tile_dim },
-					ImVec2{ (float)i * tile_dim, (float)go_game.board_height * tile_dim }, black, line_width);
-			}
-
-			for (size_t i = 1; i < (go_game.board_height + 1); i++) {
-				draw_list->AddLine(ImVec2{ (float)tile_dim, (float)i * tile_dim },
-					ImVec2{ (float)go_game.board_width * tile_dim, (float)i * tile_dim }, black, line_width);
-			}
-
-			// fixup grid corners
-			draw_list->AddRect(ImVec2{ (float)tile_dim, (float)tile_dim },
-				ImVec2{ (float)tile_dim * go_game.board_width, (float)tile_dim * go_game.board_height },
-				black, 0.0f, 0, line_width * 1.1f
-			);
-
-			//19x19 (19 / 2) -> 9, (9 / 2) -> 4
-			//0 1 2 3 ||4|| 5 6 7 8 |9| 10 11 12 13 ||14|| 15 16 17 18
-
-			// star points
-			uint32_t mid_star_y = go_game.board_height / 2;
-			uint32_t low_star_y = mid_star_y / 2;
-			uint32_t high_star_y = (go_game.board_height - 1) - low_star_y;
-
-			uint32_t mid_star_x = go_game.board_width / 2;
-			uint32_t low_star_x = mid_star_x / 2;
-			uint32_t high_star_x = (go_game.board_width - 1) - low_star_x;
-
+		ImGui::Indent();
+		ImGui::Unindent();
+		*/
+		/*
+		* Drawing a custom gradient (rectangle)
+			ImGui::Text("Gradients");
+			ImVec2 gradient_size = ImVec2(ImGui::CalcItemWidth(), ImGui::GetFrameHeight()); //get width and height
 			{
-				draw_list->AddCircleFilled(
-					ImVec2{ (float)tile_dim * (low_star_y + 1), (float)tile_dim * (low_star_x + 1) }, (line_width * 2.0f),
-					black);
-				/*
-				draw_list->AddCircleFilled(
-					ImVec2{ (float)tile_dim * (low_star_y + 1), (float)tile_dim * (mid_star_x + 1) }, (line_width * 2.5f),
-					black);
-					*/
-				draw_list->AddCircleFilled(
-					ImVec2{ (float)tile_dim * (low_star_y + 1), (float)tile_dim * (high_star_x + 1) }, (line_width * 2.0f),
-					black);
-
-				/*
-				draw_list->AddCircleFilled(
-					ImVec2{ (float)tile_dim * (mid_star_y + 1), (float)tile_dim * (low_star_x + 1) }, (line_width * 2.5f),
-					black);
-					*/
-				draw_list->AddCircleFilled(
-					ImVec2{ (float)tile_dim * (mid_star_y + 1), (float)tile_dim * (mid_star_x + 1) }, (line_width * 2.0f),
-					black);
-				/*
-				draw_list->AddCircleFilled(
-					ImVec2{ (float)tile_dim * (mid_star_y + 1), (float)tile_dim * (high_star_x + 1) }, (line_width * 2.5f),
-					black);
-					*/
-				draw_list->AddCircleFilled(
-					ImVec2{ (float)tile_dim * (high_star_y + 1), (float)tile_dim * (low_star_x + 1) }, (line_width * 2.0f),
-					black);
-				/*
-				draw_list->AddCircleFilled(
-					ImVec2{ (float)tile_dim * (high_star_y + 1), (float)tile_dim * (mid_star_x + 1) }, (line_width * 2.5f),
-					black);
-					*/
-				draw_list->AddCircleFilled(
-					ImVec2{ (float)tile_dim * (high_star_y + 1), (float)tile_dim * (high_star_x + 1) }, (line_width * 2.0f),
-					black);
+				ImVec2 p0 = ImGui::GetCursorScreenPos(); // get the position ImGui would draw
+				ImVec2 p1 = ImVec2(p0.x + gradient_size.x, p0.y + gradient_size.y);
+				ImU32 col_a = ImGui::GetColorU32(IM_COL32(0, 0, 0, 255));
+				ImU32 col_b = ImGui::GetColorU32(IM_COL32(255, 255, 255, 255));
+				draw_list->AddRectFilledMultiColor(p0, p1, col_a, col_b, col_b, col_a); // draw
+				ImGui::InvisibleButton("##gradient1", gradient_size); // place an invisible item to bump where imgui would draw next
 			}
-
-			for (size_t y = 0; y < go_game.board_height; y++) {
-				for (size_t x = 0; x < go_game.board_width; x++) {
-					ImVec2 top_left = { (float)tile_dim * (x + 1) - (tile_dim / 4), (float)tile_dim * (y + 1) - (tile_dim / 4) };
-					ImVec2 bottom_right = { (float)tile_dim * (x + 1) + (tile_dim / 4), (float)tile_dim * (y + 1) + (tile_dim / 4) };
-
-					bool is_hovering = ImGui::IsMouseHoveringRect(top_left, bottom_right);
-
-					bool placed_marker = false; //go_game.board[y * go_game.board_width + x] != go_ctx::empty;
-					try {
-						if (!placed_marker && is_hovering && left_clicked) {
-							//placed_marker = go_game.place_marker(y, x, 1ull);
-							client.call("perform_move", (uint32_t)y, (uint32_t)x, (uint8_t)1ull);
-						}
-						else if (!placed_marker && is_hovering && right_clicked) {
-							//placed_marker = go_game.place_marker(y, x, 2ull);
-							client.call("perform_move", (uint32_t)y, (uint32_t)x, (uint8_t)2ull);
-						}
-					} catch (rpc::rpc_error& e) {
-						std::cout << std::endl << e.what() << std::endl;
-						std::cout << "in function '" << e.get_function_name() << "': ";
-
-						using err_t = std::tuple<int, std::string>;
-						auto err = e.get_error().as<err_t>();
-						std::cout << "[error " << std::get<0>(err) << "]: " << std::get<1>(err)
-							<< std::endl;
-						return 1;
-					}
-					
-					if (go_game.board[y * go_game.board_width + x] != go_ctx::empty) {
-						draw_list->AddCircleFilled(
-							ImVec2{ (float)tile_dim * (x + 1), (float)tile_dim * (y + 1) },
-							((tile_dim * 3) / 8),
-							team_color_palette[go_game.board[y * go_game.board_width + x] % team_color_palette.size()]);
-					}
-					// if placed marker -> alternate teams
+		*/
+		//ImGuiTabBarFlags_FittingPolicyMask_
+		if (ImGui::BeginTabBar("Tabs")) {
+			//ImGui::Begin("##go", nullptr, 0);
+			if (ImGui::BeginTabItem("Study", nullptr, ImGuiTabItemFlags_None)) {
+				go_board_interaction interaction = draw_go_match(study, study_settings);
+				if (interaction.left_clicked) {
+					study.go_game.place_marker(interaction.interest_y, interaction.interest_x, study.team_turn);
+					study.team_turn = study.next_to_play_after(study.team_turn);
+				} else if (interaction.right_clicked) {
+					study.go_game.remove_marker_unchecked(interaction.interest_y, interaction.interest_x);
 				}
+				ImGui::EndTabItem();
 			}
 
+			if (ImGui::BeginTabItem("New Game", nullptr, ImGuiTabItemFlags_None))
+			{
+				ImGui::Text("Host New Game Menu");
+				ImGui::EndTabItem();
+			}
 
+			if (ImGui::BeginTabItem("Join Game", nullptr, ImGuiTabItemFlags_None)) {
+				ImGui::Text("Join Game Menu");
+				ImGui::EndTabItem();
+			}
 
-			ImGui::End();
+			if (ImGui::BeginTabItem("Games List", nullptr, ImGuiTabItemFlags_None))
+			{
+				//ImGui::Text("Games List");
+
+				for (size_t i = 0; i < matches.size() && i < settings.size(); i++) {
+					go_board_interaction interaction = draw_go_match(matches[i], settings[i]);
+					ImGui::InvisibleButton("##MatchOverview", ImVec2{ interaction.width,interaction.height });
+				}
+
+				ImGui::EndTabItem();
+			}
+			ImGui::EndTabBar();
 		}
+		//int width;
+		//int height;
+		//glfwGetFramebufferSize(r.window, &width, &height);
+		//ImGui::SetNextWindowSize(ImVec2(width, height)); // ensures ImGui fits the GLFW window
+
+		//int tile_xdim = width / (go_game.board_width + 1);
+		//int tile_ydim = height / (go_game.board_height + 1);
+
+		//int tile_dim = std::min(tile_xdim, tile_ydim);
+		//ImGui::SetNextWindowPos(ImVec2(0, 0));
 
 		ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
 		// Rendering

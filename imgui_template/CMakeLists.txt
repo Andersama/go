@@ -16,8 +16,11 @@ find_package(unofficial-sqlite3 CONFIG REQUIRED)
 # rpc
 find_package(rpclib CONFIG REQUIRED)
 
+# fmt
+find_package(fmt CONFIG REQUIRED)
+
 # Add source to this project's executable.
-add_executable (imgui_template "imgui_template.cpp" "imgui_template.h" "imgui/imconfig.h" "imgui/imgui.cpp" "imgui/imgui.h" "imgui/imgui_demo.cpp" "imgui/imgui_draw.cpp" "imgui/imgui_impl_glfw.cpp" "imgui/imgui_impl_glfw.h" "imgui/imgui_impl_opengl3.cpp" "imgui/imgui_impl_opengl3.h" "imgui/imgui_impl_opengl3_loader.h" "imgui/imgui_internal.h" "imgui/imgui_stdlib.cpp" "imgui/imgui_stdlib.h" "imgui/imgui_tables.cpp" "imgui/imgui_widgets.cpp" "imgui/imstb_rectpack.h" "imgui/imstb_textedit.h" "imgui/imstb_truetype.h" "zpp_bits/zpp_bits.h")
+add_executable (imgui_template "imgui_template.cpp" "imgui_template.h" "imgui/imconfig.h" "imgui/imgui.cpp" "imgui/imgui.h" "imgui/imgui_demo.cpp" "imgui/imgui_draw.cpp" "imgui/imgui_impl_glfw.cpp" "imgui/imgui_impl_glfw.h" "imgui/imgui_impl_opengl3.cpp" "imgui/imgui_impl_opengl3.h" "imgui/imgui_impl_opengl3_loader.h" "imgui/imgui_internal.h" "imgui/imgui_stdlib.cpp" "imgui/imgui_stdlib.h" "imgui/imgui_tables.cpp" "imgui/imgui_widgets.cpp" "imgui/imstb_rectpack.h" "imgui/imstb_textedit.h" "imgui/imstb_truetype.h" "zpp_bits/zpp_bits.h" "stack_vector/stack_vector.h")
 
 if (CMAKE_VERSION VERSION_GREATER 3.12)
   set_property(TARGET imgui_template PROPERTY CXX_STANDARD 20)
@@ -30,4 +33,5 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 	${OPENGL_LIBRARIES}
 	unofficial::sqlite3::sqlite3
 	rpclib::rpc
+	fmt::fmt-header-only
 )
